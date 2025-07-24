@@ -6,52 +6,61 @@
 </head>
 <body>
   <!--
-    Invisible widget that persists & restores the selected Event record
-    across pages. Must be bound to the Event table, mapping only the 'id' field.
+    Invisible widget that:
+      • Watches your Event table selection
+      • Persists it in sessionStorage
+      • Restores it on every page load
+      • Drives the document cursor (allowSelectBy: true)
   -->
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // 1) Tell Grist we’re ready, with no permission prompts and only mapping 'id'
+    // 1) Initialize as a linking widget:
+    //    - no permission prompts (none)
+    //    - map only the 'id' column
+    //    - allowSelectBy: true enables global cursor control
     grist.ready({
       requiredAccess: 'none',
       columns: ['id'],
+      allowSelectBy: true
     });
 
     const STORAGE_KEY = 'persist_cursor_Event';
 
-    /**
-     * Reads the last-saved {tableId, rowId, colId} and
-     * sets the document cursor there.
-     */
+    // 2) Restore logic: read last-saved cursor and move it globally
     async function restoreCursor() {
       const stored = sessionStorage.getItem(STORAGE_KEY);
       if (!stored) { return; }
       try {
         const {tableId, rowId, colId} = JSON.parse(stored);
+        // This now drives the document-level cursor
         await grist.setCursorPos({tableId, rowId, colId});
-        console.log('✅ Restored cursor to', tableId, rowId, colId);
+        console.log('✅ Restored global cursor to', tableId, rowId, colId);
       } catch (err) {
         console.warn('⚠️ Failed to restore cursor:', err);
       }
     }
 
-    // 2) Restore immediately on every page load
-    window.addEventListener('load', restoreCursor);
+    let didRestore = false;
 
-    /**
-     * Fires whenever the user picks a record in the Event table.
-     * Saves the full cursor triple so we can restore it on other pages.
-     */
+    // 3) onRecord fires once immediately (with the current selection)
+    //    and again whenever the selection changes.
+    //    We use the *first* call to restoreCursor, then always store.
     grist.onRecord((record) => {
-      if (!record || record.id == null) { return; }
-      const cursor = {
-        tableId: 'Event',
-        rowId: record.id,
-        colId: 'id',  // column your SELECT BY widget is bound to
-      };
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cursor));
-      console.log('💾 Stored cursor:', cursor);
+      if (!didRestore) {
+        restoreCursor();
+        didRestore = true;
+      }
+      if (record && record.id != null) {
+        // Save the full cursor position for Event.id
+        const cursor = {
+          tableId: 'Event',
+          rowId: record.id,
+          colId: 'id'
+        };
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cursor));
+        console.log('💾 Stored Event cursor:', cursor);
+      }
     });
   </script>
 </body>
