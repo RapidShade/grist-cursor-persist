@@ -5,19 +5,23 @@
   <title>Cursor Persist</title>
 </head>
 <body>
-  <!-- Invisible widget to persist & restore Event.id across pages -->
+  <!-- Invisible widget that persists & restores the Event.id selection -->
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // 1) Initialize the widget: no prompts, use manifest mappings, allowSelectBy
+    // 1) Initialize plugin:
+    //    - full access so setCursorPos() is permitted
+    //    - map only the 'id' column (no other selector)
+    //    - allow this widget to drive the master cursor
     grist.ready({
-      requiredAccess: 'read+table',
+      requiredAccess: 'full',
+      columns: ['id'],
       allowSelectBy: true
     });
 
     const STORAGE_KEY = 'persist_cursor_Event';
 
-    // 2) Whenever the user picks a record in Event.id, save it
+    // 2) Whenever the user picks an Event, save its id
     grist.onRecord((record) => {
       if (record && record.id != null) {
         const cursor = { tableId: 'Event', rowId: record.id, colId: 'id' };
@@ -26,7 +30,7 @@
       }
     });
 
-    // 3) On page load, after a short delay, restore that cursor globally
+    // 3) On page load, after a brief delay, restore the saved cursor
     window.addEventListener('load', () => {
       setTimeout(async () => {
         const raw = sessionStorage.getItem(STORAGE_KEY);
@@ -38,8 +42,9 @@
         } catch (err) {
           console.warn('⚠️ Failed to restore cursor:', err);
         }
-      }, 200); // give Grist its own views time to initialize
+      }, 200); // allow Grist’s views to finish initializing
     });
   </script>
 </body>
 </html>
+
