@@ -5,14 +5,20 @@
   <title>Cursor Persist</title>
 </head>
 <body>
-  <!-- Invisible widget that persists & restores the Event.id selection -->
+  <!--
+    Invisible widget that:
+     • Drives the Event table’s master cursor
+     • Persists every selected Event.id
+     • Restores that selection on every page load
+    No column chooser will ever appear—only Event.id is mapped.
+  -->
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // 1) Initialize plugin:
-    //    - full access so setCursorPos() is permitted
-    //    - map only the 'id' column (no other selector)
-    //    - allow this widget to drive the master cursor
+    // Initialize plugin:
+    //  - full access so setCursorPos() works
+    //  - columns:['id'] forces binding to only the id column (no chooser)
+    //  - allowSelectBy:true lets this widget drive the shared cursor
     grist.ready({
       requiredAccess: 'full',
       columns: ['id'],
@@ -21,8 +27,8 @@
 
     const STORAGE_KEY = 'persist_cursor_Event';
 
-    // 2) Whenever the user picks an Event, save its id
-    grist.onRecord((record) => {
+    // Save {tableId, rowId, colId} every time Event.id changes
+    grist.onRecord(record => {
       if (record && record.id != null) {
         const cursor = { tableId: 'Event', rowId: record.id, colId: 'id' };
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cursor));
@@ -30,11 +36,11 @@
       }
     });
 
-    // 3) On page load, after a brief delay, restore the saved cursor
+    // Restore that cursor on each page load, after a short pause
     window.addEventListener('load', () => {
       setTimeout(async () => {
         const raw = sessionStorage.getItem(STORAGE_KEY);
-        if (!raw) { return; }
+        if (!raw) return;
         try {
           const {tableId, rowId, colId} = JSON.parse(raw);
           await grist.setCursorPos({tableId, rowId, colId});
@@ -42,9 +48,10 @@
         } catch (err) {
           console.warn('⚠️ Failed to restore cursor:', err);
         }
-      }, 200); // allow Grist’s views to finish initializing
+      }, 200);
     });
   </script>
 </body>
 </html>
+
 
