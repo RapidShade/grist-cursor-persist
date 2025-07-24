@@ -5,20 +5,10 @@
   <title>Persist Event Cursor Widget</title>
 </head>
 <body>
-  <!--
-    Invisible widget that:
-      • Watches your Event table selection
-      • Persists it in sessionStorage
-      • Restores it on every page load
-      • Drives the document cursor (allowSelectBy: true)
-  -->
-
+  <!-- Invisible widget: persists & restores the Event master-record -->
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // 1) Initialize as a linking widget:
-    //    - no permission prompts (none)
-    //    - map only the 'id' column
-    //    - allowSelectBy: true enables global cursor control
+    // Initialize as a “Select By” source with no prompts, mapping only 'id'
     grist.ready({
       requiredAccess: 'none',
       columns: ['id'],
@@ -27,40 +17,28 @@
 
     const STORAGE_KEY = 'persist_cursor_Event';
 
-    // 2) Restore logic: read last-saved cursor and move it globally
-    async function restoreCursor() {
-      const stored = sessionStorage.getItem(STORAGE_KEY);
-      if (!stored) { return; }
-      try {
-        const {tableId, rowId, colId} = JSON.parse(stored);
-        // This now drives the document-level cursor
-        await grist.setCursorPos({tableId, rowId, colId});
-        console.log('✅ Restored global cursor to', tableId, rowId, colId);
-      } catch (err) {
-        console.warn('⚠️ Failed to restore cursor:', err);
-      }
-    }
-
-    let didRestore = false;
-
-    // 3) onRecord fires once immediately (with the current selection)
-    //    and again whenever the selection changes.
-    //    We use the *first* call to restoreCursor, then always store.
+    // Save every time the user picks a new Event record
     grist.onRecord((record) => {
-      if (!didRestore) {
-        restoreCursor();
-        didRestore = true;
-      }
       if (record && record.id != null) {
-        // Save the full cursor position for Event.id
-        const cursor = {
-          tableId: 'Event',
-          rowId: record.id,
-          colId: 'id'
-        };
+        const cursor = { tableId: 'Event', rowId: record.id, colId: 'id' };
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cursor));
         console.log('💾 Stored Event cursor:', cursor);
       }
+    });
+
+    // Restore after a short delay once the page fully loads
+    window.addEventListener('load', () => {
+      setTimeout(async () => {
+        const data = sessionStorage.getItem(STORAGE_KEY);
+        if (!data) { return; }
+        try {
+          const {tableId, rowId, colId} = JSON.parse(data);
+          await grist.setCursorPos({tableId, rowId, colId});
+          console.log('✅ Restored global cursor to', tableId, rowId, colId);
+        } catch (err) {
+          console.warn('⚠️ Failed to restore cursor:', err);
+        }
+      }, 200);  // give Grist 200 ms to finish view initialization
     });
   </script>
 </body>
