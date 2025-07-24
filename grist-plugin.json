@@ -1,0 +1,22 @@
+{
+  "id": "cursor-persist",
+  "name": "Cursor Persist Widget",
+  "version": "0.1.0",
+  "main": "index.html",
+
+  // You must ask for full access if you want setCursorPos to work
+  "requiredAccess": "full",
+  
+  // This makes the widget drive the global cursor
+  "allowSelectBy": true,
+
+  // *** THIS HARDCODES Event.id → no column UI ever appears ***
+  "sections": [
+    {
+      "id": "persistSection",
+      "mappings": {
+        "id": { "table": "Event", "column": "id" }
+      }
+    }
+  ]
+}
