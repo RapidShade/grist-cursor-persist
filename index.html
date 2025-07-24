@@ -2,22 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Persist Event Cursor Widget</title>
+  <title>Cursor Persist</title>
 </head>
 <body>
-  <!-- Invisible widget: persists & restores the Event master-record -->
+  <!-- Invisible widget to persist & restore Event.id across pages -->
+
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // Initialize as a “Select By” source with no prompts, mapping only 'id'
+    // 1) Initialize the widget: no prompts, use manifest mappings, allowSelectBy
     grist.ready({
-      requiredAccess: 'none',
-      columns: ['id'],
+      requiredAccess: 'read+table',
       allowSelectBy: true
     });
 
     const STORAGE_KEY = 'persist_cursor_Event';
 
-    // Save every time the user picks a new Event record
+    // 2) Whenever the user picks a record in Event.id, save it
     grist.onRecord((record) => {
       if (record && record.id != null) {
         const cursor = { tableId: 'Event', rowId: record.id, colId: 'id' };
@@ -26,19 +26,19 @@
       }
     });
 
-    // Restore after a short delay once the page fully loads
+    // 3) On page load, after a short delay, restore that cursor globally
     window.addEventListener('load', () => {
       setTimeout(async () => {
-        const data = sessionStorage.getItem(STORAGE_KEY);
-        if (!data) { return; }
+        const raw = sessionStorage.getItem(STORAGE_KEY);
+        if (!raw) { return; }
         try {
-          const {tableId, rowId, colId} = JSON.parse(data);
+          const {tableId, rowId, colId} = JSON.parse(raw);
           await grist.setCursorPos({tableId, rowId, colId});
           console.log('✅ Restored global cursor to', tableId, rowId, colId);
         } catch (err) {
           console.warn('⚠️ Failed to restore cursor:', err);
         }
-      }, 200);  // give Grist 200 ms to finish view initialization
+      }, 200); // give Grist its own views time to initialize
     });
   </script>
 </body>
