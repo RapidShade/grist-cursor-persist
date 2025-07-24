@@ -5,29 +5,20 @@
   <title>Cursor Persist</title>
 </head>
 <body>
-  <!--
-    Invisible widget that:
-     • Drives the Event table’s master cursor
-     • Persists every selected Event.id
-     • Restores that selection on every page load
-    No column chooser will ever appear—only Event.id is mapped.
-  -->
+  <!-- Invisible: persists & restores Event.id across pages -->
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // Initialize plugin:
-    //  - full access so setCursorPos() works
-    //  - columns:['id'] forces binding to only the id column (no chooser)
-    //  - allowSelectBy:true lets this widget drive the shared cursor
+    // 1) Initialize exactly as the manifest requests:
     grist.ready({
       requiredAccess: 'full',
-      columns: ['id'],
       allowSelectBy: true
+      // (no `columns:` here—column mapping comes from the manifest)
     });
 
     const STORAGE_KEY = 'persist_cursor_Event';
 
-    // Save {tableId, rowId, colId} every time Event.id changes
+    // 2) Save each new Event.id selection
     grist.onRecord(record => {
       if (record && record.id != null) {
         const cursor = { tableId: 'Event', rowId: record.id, colId: 'id' };
@@ -36,11 +27,12 @@
       }
     });
 
-    // Restore that cursor on each page load, after a short pause
+    // 3) On each load, restore after a short delay so Grist’s own section.cursor
+    //    logic has finished initializing and won’t immediately overwrite us.
     window.addEventListener('load', () => {
       setTimeout(async () => {
         const raw = sessionStorage.getItem(STORAGE_KEY);
-        if (!raw) return;
+        if (!raw) { return; }
         try {
           const {tableId, rowId, colId} = JSON.parse(raw);
           await grist.setCursorPos({tableId, rowId, colId});
@@ -53,5 +45,6 @@
   </script>
 </body>
 </html>
+
 
 
