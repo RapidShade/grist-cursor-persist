@@ -5,46 +5,45 @@
   <title>Cursor Persist</title>
 </head>
 <body>
-  <!-- Invisible: persists & restores Event.id across pages -->
+  <!-- Invisible widget that persists & restores the Event.id selection -->
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // 1) Initialize exactly as the manifest requests:
+    // 1) Init plugin:
     grist.ready({
-      requiredAccess: 'full',
-      allowSelectBy: true
-      // (no `columns:` here—column mapping comes from the manifest)
+      requiredAccess: 'full',  // so setSelectedRows() will work
+      columns: ['id'],         // hard‐wire to your Event.id
+      allowSelectBy: true      // so linked widgets listen
     });
 
-    const STORAGE_KEY = 'persist_cursor_Event';
+    const KEY = 'persist_cursor_Event';
 
-    // 2) Save each new Event.id selection
+    // 2) Whenever the user picks an Event in this widget, save its id
     grist.onRecord(record => {
       if (record && record.id != null) {
-        const cursor = { tableId: 'Event', rowId: record.id, colId: 'id' };
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cursor));
-        console.log('💾 Stored Event cursor:', cursor);
+        sessionStorage.setItem(KEY, record.id);
+        console.log('💾 Stored Event ID:', record.id);
       }
     });
 
-    // 3) On each load, restore after a short delay so Grist’s own section.cursor
-    //    logic has finished initializing and won’t immediately overwrite us.
+    // 3) On page load, restore that selection as the widget’s selectedRows
     window.addEventListener('load', () => {
       setTimeout(async () => {
-        const raw = sessionStorage.getItem(STORAGE_KEY);
+        const raw = sessionStorage.getItem(KEY);
         if (!raw) { return; }
+        const rowId = Number(raw);
         try {
-          const {tableId, rowId, colId} = JSON.parse(raw);
-          await grist.setCursorPos({tableId, rowId, colId});
-          console.log('✅ Restored global cursor to', tableId, rowId, colId);
+          await grist.setSelectedRows([rowId]);
+          console.log('✅ Restored selectedRows to Event ID', rowId);
         } catch (err) {
-          console.warn('⚠️ Failed to restore cursor:', err);
+          console.warn('⚠️ Failed to restore selection:', err);
         }
-      }, 200);
+      }, 200); // let Grist finish loading
     });
   </script>
 </body>
 </html>
+
 
 
 
