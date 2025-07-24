@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Persist Event Cursor Widget</title>
+</head>
+<body>
+  <!--
+    This widget has no visible UI. It simply listens for cursor changes
+    on the "Event" table and restores the last‐selected Event on each load.
+  -->
+
+  <!-- Grist plugin API (official) -->
+  <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+  <script>
+    // Wait for Grist to initialize the plugin API
+    // Tell Grist explicitly that this widget needs no table access
+    grist.ready({ requiredAccess: 'none' });
+
+    // SessionStorage key, namespaced to the Event table
+    const STORAGE_KEY = 'persist_cursor_Event';
+
+    /**
+     * restoreCursor()
+     * ----------------
+     * On page load, read the saved cursor for Event (if any)
+     * and ask Grist to set its cursor to that position.
+     */
+    async function restoreCursor() {
+      const stored = sessionStorage.getItem(STORAGE_KEY);
+      if (!stored) {
+        return;  // Nothing to restore
+      }
+      try {
+        const cursor = JSON.parse(stored);
+        // Request Grist to move its cursor to the saved record
+        await grist.setCursorPos(cursor);
+        console.log('✅ Restored Event cursor:', cursor);
+      } catch (err) {
+        console.warn('⚠️ Failed to restore Event cursor:', err);
+      }
+    }
+
+    // Restore immediately when the widget loads
+    window.addEventListener('load', restoreCursor);
+
+    /**
+     * onRecordChange(record, mappings)
+     * --------------------------------
+     * Fires every time *any* record selection changes on this page.
+     * We grab the current cursor and, if it’s on the Event table,
+     * serialize+save it in sessionStorage.
+     */
+    grist.onRecord(async (record, mappings) => {
+      try {
+        const cursor = await grist.getCursorPos();
+        // Only persist if the user is currently viewing the Event table
+        if (cursor.tableId === 'Event') {
+          sessionStorage.setItem(STORAGE_KEY, JSON.stringify(cursor));
+          console.log('💾 Stored Event cursor:', cursor);
+        }
+      } catch (err) {
+        console.error('Error fetching/storing cursor:', err);
+      }
+    });
+  </script>
+</body>
+</html>
