@@ -2,48 +2,150 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Cursor Persist</title>
+  <title>Cursor Persist (v0.2.0)</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; }
+    #status {
+      font: 11px/1.3 system-ui, sans-serif; color: #888;
+      padding: 4px 6px; white-space: nowrap; overflow: hidden;
+    }
+    body.silent #status { display: none; }
+  </style>
 </head>
-<body>
-  <!-- Invisible widget that persists & restores the Event.id selection -->
+<body class="silent">
+  <!--
+    Cursor Persist v0.2.0
+
+    What it does:
+      Remembers the row the user has selected in a bound table (typically Events)
+      and re-selects that same row whenever the widget reloads — page switch,
+      tab refresh, or doc reopen. Other widgets on the page can follow this
+      selection by setting "Select By → Cursor Persist" on each of them.
+
+    Setup, per page where you want persistence:
+      1. Add this widget to the page (any size; it renders invisibly).
+      2. In the widget's right-hand panel, bind it to your master table (Events).
+      3. On every OTHER widget on the same page that should follow the cursor,
+         open the right-hand panel and set "Select By" → this widget.
+      4. Repeat for every page you want covered. State is shared via
+         localStorage (per doc + table) so it survives across pages and tabs.
+
+    Append ?debug=1 to the widget URL to make the status line visible.
+  -->
+
+  <div id="status">cursor-persist initializing…</div>
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    // 1) Init plugin:
+    const VERSION = '0.2.0';
+    const KEY_PREFIX = 'persist_cursor';
+
+    const params = new URLSearchParams(location.search);
+    if (params.get('debug') === '1') document.body.classList.remove('silent');
+    const statusEl = document.getElementById('status');
+    const setStatus = (msg) => { statusEl.textContent = `[cursor-persist v${VERSION}] ${msg}`; };
+
+    // Discover the docId from the parent URL Grist sets on its iframes.
+    // Grist passes `?gristDocId=…` in some SDK versions; fall back to a
+    // referrer parse, and finally to the literal string 'unknown'. We only
+    // use this as part of the storage key, so a fallback is fine.
+    function discoverDocId() {
+      const p = new URLSearchParams(location.search).get('gristDocId');
+      if (p) return p;
+      const ref = document.referrer || '';
+      const m = ref.match(/\/doc\/([^/?#]+)/);
+      return m ? m[1] : 'unknown';
+    }
+
+    const docId = discoverDocId();
+    let tableId = null;
+    let storageKey = null;     // built once tableId is known
+    let restored = false;      // gate: ignore onRecord until restore completes
+    let lastSavedId = null;    // dedupe writes
+
+    function buildKey() {
+      return `${KEY_PREFIX}::${docId}::${tableId || 'unknown'}`;
+    }
+
+    async function discoverTableId() {
+      // Try the modern SDK path first.
+      try {
+        if (grist.selectedTable && typeof grist.selectedTable.getTableId === 'function') {
+          const id = await grist.selectedTable.getTableId();
+          if (id) return id;
+        }
+      } catch (_) { /* fall through */ }
+      // Older SDKs: grist.getTable() returns a thenable proxy; some expose .tableId
+      try {
+        const t = await grist.getTable();
+        if (t && t.tableId) return t.tableId;
+      } catch (_) { /* fall through */ }
+      return null;
+    }
+
+    async function restoreSelection() {
+      const raw = localStorage.getItem(storageKey);
+      if (raw == null) {
+        setStatus(`no stored cursor for ${tableId || 'unbound table'}; idle`);
+        return;
+      }
+      const rowId = Number(raw);
+      if (!Number.isFinite(rowId) || rowId <= 0) {
+        setStatus(`stored value not a row id: ${raw}; idle`);
+        return;
+      }
+      // Use the explicit-tableId form when we know it — far more reliable
+      // than the bare-array legacy form in current Grist SDK.
+      const payload = tableId ? { tableId, rowIds: [rowId] } : [rowId];
+      await grist.setSelectedRows(payload);
+      lastSavedId = rowId;
+      setStatus(`restored ${tableId || 'table'} row ${rowId}`);
+      console.log('[cursor-persist] restored', tableId, rowId);
+    }
+
+    // 1) Initialize.
     grist.ready({
-      requiredAccess: 'full',  // so setSelectedRows() will work
-      columns: ['id'],         // hard‐wire to your Event.id
-      allowSelectBy: true      // so linked widgets listen
+      requiredAccess: 'full',
+      // No `columns` here. We only need record.id, which Grist always
+      // provides for the bound row. Declaring a fake column would force
+      // the user through a mapping UI for no benefit.
+      allowSelectBy: true
     });
 
-    const KEY = 'persist_cursor_Event';
-
-    // 2) Whenever the user picks an Event in this widget, save its id
+    // 2) Whenever the cursor moves in the bound table, save the id —
+    //    but only AFTER restore has run, so we don't overwrite the stored
+    //    value with Grist's initial cursor.
     grist.onRecord(record => {
-      if (record && record.id != null) {
-        sessionStorage.setItem(KEY, record.id);
-        console.log('💾 Stored Event ID:', record.id);
+      if (!restored) return;
+      if (!record || record.id == null) return;
+      const id = Number(record.id);
+      if (!Number.isFinite(id) || id <= 0) return;
+      if (id === lastSavedId) return;
+      try {
+        localStorage.setItem(storageKey, String(id));
+        lastSavedId = id;
+        console.log('[cursor-persist] saved', tableId, id);
+      } catch (err) {
+        console.warn('[cursor-persist] save failed:', err);
       }
     });
 
-    // 3) On page load, restore that selection as the widget’s selectedRows
-    window.addEventListener('load', () => {
-      setTimeout(async () => {
-        const raw = sessionStorage.getItem(KEY);
-        if (!raw) { return; }
-        const rowId = Number(raw);
-        try {
-          await grist.setSelectedRows([rowId]);
-          console.log('✅ Restored selectedRows to Event ID', rowId);
-        } catch (err) {
-          console.warn('⚠️ Failed to restore selection:', err);
-        }
-      }, 200); // let Grist finish loading
-    });
+    // 3) Bootstrap: discover the tableId, build the storage key, attempt
+    //    restore, THEN flip the `restored` flag so subsequent onRecord
+    //    callbacks start saving. This ordering is the heart of the fix.
+    (async () => {
+      try {
+        tableId = await discoverTableId();
+        storageKey = buildKey();
+        setStatus(`waiting for grist (table=${tableId || 'unbound'})`);
+        await restoreSelection();
+      } catch (err) {
+        console.warn('[cursor-persist] bootstrap failed:', err);
+        setStatus(`bootstrap failed: ${err && err.message || err}`);
+      } finally {
+        restored = true;
+      }
+    })();
   </script>
 </body>
 </html>
-
-
-
-
