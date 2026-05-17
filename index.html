@@ -2,87 +2,152 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Cursor Persist (v0.3.0)</title>
+  <title>Cursor Persist (v0.4.0)</title>
   <style>
-    html, body { margin: 0; padding: 0; background: transparent; }
-    #status {
-      font: 11px/1.3 system-ui, sans-serif; color: #888;
-      padding: 4px 6px; white-space: nowrap; overflow: hidden;
+    html, body {
+      margin: 0; padding: 0;
+      background: transparent;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #444;
     }
+    #panel { padding: 6px 8px; font-size: 11px; line-height: 1.45; }
+    #panel select { font-size: 11px; vertical-align: middle; }
+    #role-help { color: #888; display: block; margin-top: 2px; }
+    #status { color: #888; margin-top: 4px; white-space: nowrap; overflow: hidden; }
     body.silent #status { display: none; }
   </style>
 </head>
 <body class="silent">
   <!--
-    Cursor Persist v0.3.0 — two-widget topology
+    Cursor Persist v0.4.0 — two-widget topology with in-widget role picker.
 
-    Grist's Select By is one-directional. A widget that follows the master
-    via Select By cannot also broadcast a cursor back to the master without
-    Grist rejecting the call as a cycle. So v0.3.0 splits the responsibility
-    into two roles, selected via URL query parameter:
+    Role is selectable from the dropdown below; the choice is persisted
+    per-section via Grist's widget options API. URL `?role=` overrides
+    (and disables) the dropdown for the duration of that section's life.
 
-      ?role=listener   — Select By → master. Saves master's cursor to
-                         localStorage on every change. Does NOT broadcast.
-      ?role=driver     — No Select By. On mount, reads localStorage and
-                         broadcasts via setSelectedRows. Master Select By
-                         → this widget so the broadcast lands.
-      (no role / ?role=both)
-                       — Legacy v0.2.x behavior: saves AND tries to restore
-                         via setSelectedRows. The restore fails on any setup
-                         where this widget follows master (LinkConfig cycle).
-                         Kept for backwards compatibility; not recommended.
+    Roles:
+      listener (default): Select By → your master. Saves cursor changes.
+      driver:             No Select By. Master Select By → this widget.
+                          Broadcasts the stored row id on mount.
+      both:               Legacy combined mode. May trigger a LinkConfig
+                          cycle error if this widget has Select By → master.
 
-    Setup, per page where you want persistence:
-      1. Add Custom Widget #1 with URL `.../grist-cursor-persist/?role=listener`,
-         bind to your master table (Events), set Select By → the master grid.
-      2. Add Custom Widget #2 with URL `.../grist-cursor-persist/?role=driver`,
-         bind to the same master table (Events). NO Select By on this one.
-      3. On the master grid: set Select By → widget #2 (the driver) so the
-         broadcast on page load actually moves the master cursor.
-      4. Append `&debug=1` to both URLs while verifying. Drop it once happy.
-      5. Repeat per page. State is shared via localStorage keyed by
-         (docName, tableId), so it survives page switches, tab refreshes,
-         and tab close/reopen for that browser.
+    Setup, per page:
+      1. Add Custom Widget #1 — bind to Events, role=listener, Select By → master.
+      2. Add Custom Widget #2 — bind to Events, role=driver, no Select By.
+      3. On the master grid: set Select By → widget #2.
+      4. Add `?debug=1` to either URL while verifying.
   -->
 
-  <div id="status">cursor-persist initializing…</div>
+  <div id="panel">
+    <label>
+      Role:
+      <select id="role-select">
+        <option value="listener">listener — save cursor</option>
+        <option value="driver">driver — restore cursor</option>
+        <option value="both">both (legacy)</option>
+      </select>
+    </label>
+    <span id="role-help"></span>
+    <div id="status">cursor-persist initializing…</div>
+  </div>
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '0.3.0';
+    const VERSION = '0.4.0';
     const KEY_PREFIX = 'persist_cursor';
+    const VALID_ROLES = ['listener', 'driver', 'both'];
+    const DEFAULT_ROLE = 'listener';
+    const ROLE_HELP = {
+      listener: 'Wiring: this widget\'s Select By → your master grid.',
+      driver:   'Wiring: master grid\'s Select By → this widget. No Select By here.',
+      both:     'Combines listener+driver. Will cycle-error if Select By is set on this widget.'
+    };
 
     const params = new URLSearchParams(location.search);
     if (params.get('debug') === '1') document.body.classList.remove('silent');
 
-    // Role: 'listener' (save-only), 'driver' (restore-only), or 'both' (legacy).
-    const ROLE = (params.get('role') || 'both').toLowerCase();
-    const VALID_ROLES = new Set(['listener', 'driver', 'both']);
-    const role = VALID_ROLES.has(ROLE) ? ROLE : 'both';
-
     const statusEl = document.getElementById('status');
-    const setStatus = (msg) => {
-      statusEl.textContent = `[cursor-persist v${VERSION} ${role}] ${msg}`;
-    };
+    const roleSelectEl = document.getElementById('role-select');
+    const roleHelpEl = document.getElementById('role-help');
 
-    // Discover the docId via grist.docApi.getDocName() (stable per-doc string),
-    // with URL-query and referrer fallbacks for older SDKs.
+    let role = DEFAULT_ROLE;
+    const setStatus = (msg) => {
+      statusEl.textContent = `[v${VERSION} ${role}] ${msg}`;
+    };
+    const updateHelp = (r) => { roleHelpEl.textContent = ROLE_HELP[r] || ''; };
+
+    // URL `?role=…` is an override that disables the dropdown.
+    const urlRoleRaw = (params.get('role') || '').toLowerCase();
+    const isUrlOverride = VALID_ROLES.includes(urlRoleRaw);
+
+    async function loadRole() {
+      if (isUrlOverride) {
+        roleSelectEl.disabled = true;
+        roleSelectEl.value = urlRoleRaw;
+        roleSelectEl.title = 'role is set via URL query param; remove ?role= to use this dropdown';
+        updateHelp(urlRoleRaw);
+        return urlRoleRaw;
+      }
+      try {
+        if (grist.widgetApi && typeof grist.widgetApi.getOptions === 'function') {
+          const opts = await grist.widgetApi.getOptions();
+          if (opts && opts.role && VALID_ROLES.includes(opts.role)) {
+            roleSelectEl.value = opts.role;
+            updateHelp(opts.role);
+            return opts.role;
+          }
+        }
+      } catch (err) {
+        console.warn('[cursor-persist] getOptions failed:', err);
+      }
+      roleSelectEl.value = DEFAULT_ROLE;
+      updateHelp(DEFAULT_ROLE);
+      return DEFAULT_ROLE;
+    }
+
+    roleSelectEl.addEventListener('change', async (e) => {
+      const newRole = e.target.value;
+      if (!VALID_ROLES.includes(newRole)) return;
+      updateHelp(newRole);
+      try {
+        await grist.widgetApi.setOptions({ role: newRole });
+        setStatus(`role saved as "${newRole}"; reloading…`);
+        setTimeout(() => location.reload(), 400);
+      } catch (err) {
+        setStatus(`save failed: ${err && err.message || err}`);
+      }
+    });
+
     async function discoverDocId() {
       try {
         if (grist.docApi && typeof grist.docApi.getDocName === 'function') {
           const name = await grist.docApi.getDocName();
           if (name) return name;
         }
-      } catch (_) { /* fall through */ }
-      const p = new URLSearchParams(location.search).get('gristDocId');
+      } catch (_) {}
+      const p = params.get('gristDocId');
       if (p) return p;
-      const ref = document.referrer || '';
       try {
-        const u = new URL(ref);
+        const u = new URL(document.referrer || '');
         const seg = u.pathname.split('/').filter(Boolean)[0];
         if (seg) return seg;
-      } catch (_) { /* fall through */ }
+      } catch (_) {}
       return 'unknown';
+    }
+
+    async function discoverTableId() {
+      try {
+        if (grist.selectedTable && typeof grist.selectedTable.getTableId === 'function') {
+          const id = await grist.selectedTable.getTableId();
+          if (id) return id;
+        }
+      } catch (_) {}
+      try {
+        const t = await grist.getTable();
+        if (t && t.tableId) return t.tableId;
+      } catch (_) {}
+      return null;
     }
 
     let docId = 'unknown';
@@ -93,20 +158,6 @@
 
     function buildKey() {
       return `${KEY_PREFIX}::${docId}::${tableId || 'unknown'}`;
-    }
-
-    async function discoverTableId() {
-      try {
-        if (grist.selectedTable && typeof grist.selectedTable.getTableId === 'function') {
-          const id = await grist.selectedTable.getTableId();
-          if (id) return id;
-        }
-      } catch (_) { /* fall through */ }
-      try {
-        const t = await grist.getTable();
-        if (t && t.tableId) return t.tableId;
-      } catch (_) { /* fall through */ }
-      return null;
     }
 
     async function restoreSelection() {
@@ -127,7 +178,6 @@
         setStatus(`broadcast ${tableId || 'table'} row ${rowId}`);
         console.log('[cursor-persist] broadcast', tableId, rowId);
       } catch (err) {
-        // In `both` mode this is the expected LinkConfig cycle error.
         setStatus(`broadcast failed: ${err && err.message || err}`);
         console.warn('[cursor-persist] broadcast failed:', err);
       }
@@ -135,17 +185,12 @@
 
     grist.ready({
       requiredAccess: 'full',
-      // `driver` role doesn't need to broadcast through allowSelectBy from
-      // Grist's perspective — the master section follows us via its own
-      // Select By config — but declaring allowSelectBy: true here makes the
-      // widget appear in the master's "Select By" dropdown in the Grist UI,
-      // which the user needs to be able to wire the topology.
       allowSelectBy: true
     });
 
     grist.onRecord(record => {
       if (!restored) return;
-      if (role === 'driver') return;     // driver never saves
+      if (role === 'driver') return;
       if (!record || record.id == null) return;
       const id = Number(record.id);
       if (!Number.isFinite(id) || id <= 0) return;
@@ -163,10 +208,10 @@
 
     (async () => {
       try {
+        role = await loadRole();
         [docId, tableId] = await Promise.all([discoverDocId(), discoverTableId()]);
         storageKey = buildKey();
         setStatus(`ready (doc=${docId}, table=${tableId || 'unbound'})`);
-        // Listener role skips restore. Driver and `both` attempt it.
         if (role !== 'listener') {
           await restoreSelection();
         }
