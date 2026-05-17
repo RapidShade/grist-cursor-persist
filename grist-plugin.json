@@ -1,7 +1,7 @@
 {
   "id": "cursor-persist",
   "name": "Cursor Persist Widget",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "main": "index.html",
 
   "requiredAccess": "full",

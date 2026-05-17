@@ -5,7 +5,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Cursor Persist (v1.4.0)</title>
+  <title>Cursor Persist (v1.5.0)</title>
   <style>
     html, body {
       margin: 0; padding: 0;
@@ -22,21 +22,18 @@
 </head>
 <body class="silent">
   <!--
-    Cursor Persist v1.4.0 — commandApi.run("setCursor", …) probe.
+    Cursor Persist v1.5.0 — filter-on-restore, by design.
 
-    v1.3.0's filter-then-null left the linked card in a broken
-    zero-row state. setSelectedRows-based approaches are now
-    conclusively closed off. v1.4.0 tries the last untested SDK path:
-    grist.commandApi.run() forwards arbitrary command names to
-    Grist's internal command bus, and the command list has a
-    `setCursor` command. Argument signature is undocumented — this
-    version probes multiple shapes per master section and logs which
-    one (if any) moves the cursor.
+    All "navigate without filtering" SDK paths have been verified
+    closed (setCursorPos delegates to own _baseView only, commandApi
+    whitelists only undo/redo/viewAsCard). The remaining working
+    behavior is filter-linking: setSelectedRows([rowId]) on the
+    driver narrows the master to a single row, positioning its
+    cursor. The filter stays — by design — until the user clears
+    it manually (clear Select By, or pick a new row in the master).
 
-    Wiring vs v1.3.0: remove `Select By → driver` again (we're not
-    using setSelectedRows at all — no side effects on the detail card).
-    With v1.4.0 the detail page can stay completely untouched; the
-    driver is read-only in its effect.
+    Wiring: master sections that should follow the driver need
+    `Select By → driver`. Listener side is unchanged.
 
     Role is selectable from the dropdown below; the choice is persisted
     per-section via Grist's widget options API. URL `?role=` overrides
@@ -71,7 +68,7 @@
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '1.4.0';
+    const VERSION = '1.5.0';
     const VLOG_PREFIX = `[cursor-persist v${VERSION}]`;
     const KEY_PREFIX = 'persist_cursor';
 
@@ -92,8 +89,8 @@
     const DEFAULT_ROLE = 'listener';
     const ROLE_HELP = {
       listener: 'Wiring: this widget\'s Select By → your master grid.',
-      driver:   'Wiring: nothing (no Select By needed). Probes commandApi.run("setCursor", …) per discovered master section.',
-      both:     'Combines listener + driver. Set Select By → master on this widget. No Select By on the masters.'
+      driver:   'Wiring: master grid\'s Select By → this widget. Filter is sticky — clear Select By to unfilter.',
+      both:     'Combines listener + driver. Set Select By → master on this widget; master grid Select By → this widget.'
     };
 
     const params = new URLSearchParams(location.search);
@@ -192,24 +189,6 @@
       return `${KEY_PREFIX}::${docId}::${tableId || 'unknown'}`;
     }
 
-    // Discover non-Custom-Widget sections viewing our bound table.
-    async function discoverMasterSectionIds() {
-      if (!tableId) return [];
-      const tables = await grist.docApi.fetchTable('_grist_Tables');
-      const tableIdxs = (tables.tableId || []).map((t, i) => t === tableId ? i : -1).filter(i => i >= 0);
-      if (tableIdxs.length === 0) return [];
-      const tableRefs = new Set(tableIdxs.map(i => tables.id[i]));
-      const secs = await grist.docApi.fetchTable('_grist_Views_section');
-      const ids = secs.id || [];
-      const tableRef = secs.tableRef || [];
-      const parentKey = secs.parentKey || [];
-      const masters = [];
-      for (let i = 0; i < ids.length; i++) {
-        if (tableRefs.has(tableRef[i]) && parentKey[i] !== 'custom') masters.push(ids[i]);
-      }
-      return masters;
-    }
-
     async function restoreSelection() {
       const raw = localStorage.getItem(storageKey);
       if (raw == null) {
@@ -221,52 +200,20 @@
         setStatus(`stored value not a row id: ${raw}; idle`);
         return;
       }
-      lastSavedId = rowId;
-
-      const sectionIds = await discoverMasterSectionIds();
-      if (sectionIds.length === 0) {
-        setStatus(`no master sections found for ${tableId}`);
-        vwarn('no master sections found');
-        return;
+      // Driver fires one setSelectedRows([rowId]) broadcast. Master
+      // sections with Select By → this driver filter to that single
+      // row — cursor lands on it. Filter is sticky; user clears it
+      // manually via the master's Select By dropdown when they want
+      // to browse other rows.
+      try {
+        await grist.setSelectedRows([rowId]);
+        lastSavedId = rowId;
+        setStatus(`restored row ${rowId} (filter applied)`);
+        vlog('setSelectedRows([' + rowId + '])');
+      } catch (err) {
+        setStatus(`restore failed: ${err && err.message || err}`);
+        vwarn('setSelectedRows failed:', err);
       }
-
-      // Probe commandApi.run("setCursor", ...) with several argument
-      // shapes per section. Grist's commandApi is `rpc.getStub<any>` —
-      // untyped; the host forwards command names to the internal bus.
-      // Whether the bus accepts arbitrary commands from widgets, and
-      // what signature setCursor wants, is what we're testing.
-      const probe = async (label, fn) => {
-        try {
-          const result = await fn();
-          vlog(`probe OK: ${label}`, result === undefined ? '' : `=> ${JSON.stringify(result)}`);
-          return { ok: true };
-        } catch (err) {
-          vwarn(`probe FAIL: ${label} —`, err && err.message || err);
-          return { ok: false, err };
-        }
-      };
-
-      vlog('rowId=', rowId, 'sectionIds=', sectionIds);
-
-      // Probe 1: object form with rowId + sectionId — most likely shape.
-      // Use first section only so we don't fire dozens of commands
-      // and have no idea which one (if any) moved the cursor.
-      const sid = sectionIds[0];
-      setStatus(`probing commandApi.run("setCursor", ...) — section ${sid}, row ${rowId}`);
-
-      await probe(
-        `setCursor({rowId:${rowId}, sectionId:${sid}})`,
-        () => grist.commandApi.run('setCursor', { rowId, sectionId: sid })
-      );
-
-      await new Promise(r => setTimeout(r, 100));
-
-      await probe(
-        `setCursor(${rowId}, ${sid}) [positional]`,
-        () => grist.commandApi.run('setCursor', rowId, sid)
-      );
-
-      setStatus(`probed setCursor on section ${sid}, row ${rowId} — check console + UI`);
     }
 
     grist.ready({
