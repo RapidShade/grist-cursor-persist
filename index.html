@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Cursor Persist (v0.2.0)</title>
+  <title>Cursor Persist (v0.2.1)</title>
   <style>
     html, body { margin: 0; padding: 0; background: transparent; }
     #status {
@@ -37,7 +37,7 @@
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '0.2.0';
+    const VERSION = '0.2.1';
     const KEY_PREFIX = 'persist_cursor';
 
     const params = new URLSearchParams(location.search);
@@ -45,19 +45,32 @@
     const statusEl = document.getElementById('status');
     const setStatus = (msg) => { statusEl.textContent = `[cursor-persist v${VERSION}] ${msg}`; };
 
-    // Discover the docId from the parent URL Grist sets on its iframes.
-    // Grist passes `?gristDocId=…` in some SDK versions; fall back to a
-    // referrer parse, and finally to the literal string 'unknown'. We only
-    // use this as part of the storage key, so a fallback is fine.
-    function discoverDocId() {
+    // The docId is set asynchronously in bootstrap via grist.docApi.getDocName(),
+    // which returns a stable per-doc string. We only use it as part of the
+    // storage key, so a fallback is fine.
+    async function discoverDocId() {
+      // Preferred: grist.docApi.getDocName() — stable per-doc string.
+      try {
+        if (grist.docApi && typeof grist.docApi.getDocName === 'function') {
+          const name = await grist.docApi.getDocName();
+          if (name) return name;
+        }
+      } catch (_) { /* fall through */ }
+      // Older SDKs / fallback: try the URL query param and the parent URL.
       const p = new URLSearchParams(location.search).get('gristDocId');
       if (p) return p;
       const ref = document.referrer || '';
-      const m = ref.match(/\/doc\/([^/?#]+)/);
-      return m ? m[1] : 'unknown';
+      // Grist iframes are typically loaded from `https://<host>/<docId>/<docName>/p/<page>/`.
+      // Take the first path segment of the referrer as a best-effort docId.
+      try {
+        const u = new URL(ref);
+        const seg = u.pathname.split('/').filter(Boolean)[0];
+        if (seg) return seg;
+      } catch (_) { /* fall through */ }
+      return 'unknown';
     }
 
-    const docId = discoverDocId();
+    let docId = 'unknown';
     let tableId = null;
     let storageKey = null;     // built once tableId is known
     let restored = false;      // gate: ignore onRecord until restore completes
@@ -125,8 +138,10 @@
         localStorage.setItem(storageKey, String(id));
         lastSavedId = id;
         console.log('[cursor-persist] saved', tableId, id);
+        setStatus(`saved ${tableId || 'table'} row ${id}`);
       } catch (err) {
         console.warn('[cursor-persist] save failed:', err);
+        setStatus(`save failed: ${err && err.message || err}`);
       }
     });
 
@@ -135,9 +150,9 @@
     //    callbacks start saving. This ordering is the heart of the fix.
     (async () => {
       try {
-        tableId = await discoverTableId();
+        [docId, tableId] = await Promise.all([discoverDocId(), discoverTableId()]);
         storageKey = buildKey();
-        setStatus(`waiting for grist (table=${tableId || 'unbound'})`);
+        setStatus(`waiting for grist (doc=${docId}, table=${tableId || 'unbound'})`);
         await restoreSelection();
       } catch (err) {
         console.warn('[cursor-persist] bootstrap failed:', err);
