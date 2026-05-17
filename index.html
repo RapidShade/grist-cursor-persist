@@ -5,7 +5,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Cursor Persist (v1.0.1)</title>
+  <title>Cursor Persist (v1.1.0)</title>
   <style>
     html, body {
       margin: 0; padding: 0;
@@ -22,13 +22,18 @@
 </head>
 <body class="silent">
   <!--
-    Cursor Persist v1.0.1 — two-widget topology with in-widget role picker.
+    Cursor Persist v1.1.0 — driver uses setCursorPos, not setSelectedRows.
 
-    Driver-mode restore now uses the "broadcast then widen" trick: it
-    first broadcasts just the saved row id (filters master to that row,
-    cursor lands there), then broadcasts every row id in the bound table
-    (filter set = all rows = effectively unfiltered) so the master stays
-    on the cursor row but is free to navigate.
+    Driver-mode restore now calls grist.setCursorPos({rowId, sectionId})
+    against each non-Custom-Widget section that views the bound table.
+    This is Grist's "navigate to" API (verified in the SDK's GristView
+    interface) — it moves the section's cursor without filtering, and
+    leaves the doc undo history untouched.
+
+    Wiring change vs v1.0.x: the master sections NO LONGER need
+    "Select By → driver". Remove that wiring if you had it; otherwise the
+    listener side keeps working as before (Select By → master on the
+    listener widget).
 
     Role is selectable from the dropdown below; the choice is persisted
     per-section via Grist's widget options API. URL `?role=` overrides
@@ -63,7 +68,7 @@
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '1.0.1';
+    const VERSION = '1.1.0';
     const VLOG_PREFIX = `[cursor-persist v${VERSION}]`;
     const KEY_PREFIX = 'persist_cursor';
 
@@ -84,8 +89,8 @@
     const DEFAULT_ROLE = 'listener';
     const ROLE_HELP = {
       listener: 'Wiring: this widget\'s Select By → your master grid.',
-      driver:   'Wiring: master grid\'s Select By → this widget. No Select By here.',
-      both:     'Combines listener+driver. Will cycle-error if Select By is set on this widget.'
+      driver:   'Wiring: nothing — driver discovers masters via _grist_Views_section and moves their cursor via setCursorPos.',
+      both:     'Listener + driver in one widget. Set Select By → master on this widget; driver side needs no wiring.'
     };
 
     const params = new URLSearchParams(location.search);
@@ -184,6 +189,36 @@
       return `${KEY_PREFIX}::${docId}::${tableId || 'unknown'}`;
     }
 
+    // Find every section in the doc that views our bound table and isn't
+    // itself a Custom Widget (i.e. the real grid/card masters we want to
+    // navigate). Returns an array of numeric section ids.
+    async function discoverMasterSectionIds() {
+      if (!tableId) return [];
+      // _grist_Tables maps tableId string ↔ numeric tableRef
+      const tables = await grist.docApi.fetchTable('_grist_Tables');
+      const idxs = (tables.tableId || []).map((t, i) => t === tableId ? i : -1).filter(i => i >= 0);
+      if (idxs.length === 0) {
+        vwarn('discoverMasterSectionIds: tableId', tableId, 'not found in _grist_Tables');
+        return [];
+      }
+      const tableRefs = new Set(idxs.map(i => tables.id[i]));
+
+      // _grist_Views_section: each row is one section. parentKey is the
+      // section type ('record', 'single', 'detail', 'chart', 'custom', ...).
+      // We want anything that views our table and isn't 'custom'.
+      const secs = await grist.docApi.fetchTable('_grist_Views_section');
+      const ids = secs.id || [];
+      const tableRef = secs.tableRef || [];
+      const parentKey = secs.parentKey || [];
+      const masters = [];
+      for (let i = 0; i < ids.length; i++) {
+        if (tableRefs.has(tableRef[i]) && parentKey[i] !== 'custom') {
+          masters.push(ids[i]);
+        }
+      }
+      return masters;
+    }
+
     async function restoreSelection() {
       const raw = localStorage.getItem(storageKey);
       if (raw == null) {
@@ -195,49 +230,38 @@
         setStatus(`stored value not a row id: ${raw}; idle`);
         return;
       }
-      // Phase 1 — broadcast just the saved id. The master section
-      // (with Select By → this driver) filters down to that single row,
-      // which positions its cursor on row `rowId`.
-      // Bare-array form (not {tableId, rowIds}) — the object form trips
-      // LinkingState._srcCustomFilter which does `.map()` on the value.
+
+      let sectionIds;
       try {
-        await grist.setSelectedRows([rowId]);
-        lastSavedId = rowId;
-        setStatus(`phase 1: filter to row ${rowId}`);
-        vlog('phase 1: broadcast', tableId, rowId);
+        sectionIds = await discoverMasterSectionIds();
       } catch (err) {
-        setStatus(`phase 1 failed: ${err && err.message || err}`);
-        vwarn('phase 1 failed:', err);
+        setStatus(`section discovery failed: ${err && err.message || err}`);
+        vwarn('discoverMasterSectionIds failed:', err);
         return;
       }
 
-      // Give Grist a tick to apply the filter + cursor change.
-      await new Promise(r => setTimeout(r, 250));
-
-      // Phase 2 — broadcast every row id in the bound table. The filter
-      // set becomes "all rows", which is effectively no filter, but the
-      // master's cursor stays on `rowId` (it wasn't moved, just unfiltered).
-      // The user can navigate freely from there.
-      if (!tableId) {
-        setStatus(`broadcast ${rowId} (no tableId — can't widen filter)`);
+      if (sectionIds.length === 0) {
+        setStatus(`no master sections found for ${tableId}; nothing to restore`);
+        vwarn('no master sections found for', tableId);
         return;
       }
-      try {
-        const table = await grist.docApi.fetchTable(tableId);
-        const allIds = Array.isArray(table && table.id) ? table.id : [];
-        if (allIds.length === 0) {
-          setStatus(`broadcast ${rowId} (fetchTable returned no ids; filter stays narrow)`);
-          vwarn('phase 2: fetchTable returned no ids for', tableId);
-          return;
+
+      // setCursorPos targets a specific section by id. Inactive sections
+      // (not currently rendered) may silently no-op or throw — we catch
+      // per-section so one inactive page doesn't sink the whole restore.
+      lastSavedId = rowId;
+      let ok = 0, fail = 0;
+      for (const sectionId of sectionIds) {
+        try {
+          await grist.setCursorPos({ rowId, sectionId });
+          ok++;
+        } catch (err) {
+          fail++;
+          vwarn('setCursorPos failed for section', sectionId, ':', err && err.message || err);
         }
-        const broadcast = [rowId, ...allIds.filter(i => i !== rowId)];
-        await grist.setSelectedRows(broadcast);
-        setStatus(`restored row ${rowId} (filter widened to ${broadcast.length} rows)`);
-        vlog('phase 2: widened filter to', broadcast.length, 'rows');
-      } catch (err) {
-        setStatus(`phase 2 failed: ${err && err.message || err}`);
-        vwarn('phase 2 failed:', err);
       }
+      setStatus(`restored row ${rowId} on ${ok}/${sectionIds.length} section(s)` + (fail ? ` (${fail} failed)` : ''));
+      vlog('setCursorPos: row', rowId, 'on sections', sectionIds, '— ok=', ok, 'fail=', fail);
     }
 
     grist.ready({
