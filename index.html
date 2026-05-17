@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Cursor Persist (v0.2.1)</title>
+  <title>Cursor Persist (v0.3.0)</title>
   <style>
     html, body { margin: 0; padding: 0; background: transparent; }
     #status {
@@ -14,54 +14,69 @@
 </head>
 <body class="silent">
   <!--
-    Cursor Persist v0.2.0
+    Cursor Persist v0.3.0 — two-widget topology
 
-    What it does:
-      Remembers the row the user has selected in a bound table (typically Events)
-      and re-selects that same row whenever the widget reloads — page switch,
-      tab refresh, or doc reopen. Other widgets on the page can follow this
-      selection by setting "Select By → Cursor Persist" on each of them.
+    Grist's Select By is one-directional. A widget that follows the master
+    via Select By cannot also broadcast a cursor back to the master without
+    Grist rejecting the call as a cycle. So v0.3.0 splits the responsibility
+    into two roles, selected via URL query parameter:
+
+      ?role=listener   — Select By → master. Saves master's cursor to
+                         localStorage on every change. Does NOT broadcast.
+      ?role=driver     — No Select By. On mount, reads localStorage and
+                         broadcasts via setSelectedRows. Master Select By
+                         → this widget so the broadcast lands.
+      (no role / ?role=both)
+                       — Legacy v0.2.x behavior: saves AND tries to restore
+                         via setSelectedRows. The restore fails on any setup
+                         where this widget follows master (LinkConfig cycle).
+                         Kept for backwards compatibility; not recommended.
 
     Setup, per page where you want persistence:
-      1. Add this widget to the page (any size; it renders invisibly).
-      2. In the widget's right-hand panel, bind it to your master table (Events).
-      3. On every OTHER widget on the same page that should follow the cursor,
-         open the right-hand panel and set "Select By" → this widget.
-      4. Repeat for every page you want covered. State is shared via
-         localStorage (per doc + table) so it survives across pages and tabs.
-
-    Append ?debug=1 to the widget URL to make the status line visible.
+      1. Add Custom Widget #1 with URL `.../grist-cursor-persist/?role=listener`,
+         bind to your master table (Events), set Select By → the master grid.
+      2. Add Custom Widget #2 with URL `.../grist-cursor-persist/?role=driver`,
+         bind to the same master table (Events). NO Select By on this one.
+      3. On the master grid: set Select By → widget #2 (the driver) so the
+         broadcast on page load actually moves the master cursor.
+      4. Append `&debug=1` to both URLs while verifying. Drop it once happy.
+      5. Repeat per page. State is shared via localStorage keyed by
+         (docName, tableId), so it survives page switches, tab refreshes,
+         and tab close/reopen for that browser.
   -->
 
   <div id="status">cursor-persist initializing…</div>
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '0.2.1';
+    const VERSION = '0.3.0';
     const KEY_PREFIX = 'persist_cursor';
 
     const params = new URLSearchParams(location.search);
     if (params.get('debug') === '1') document.body.classList.remove('silent');
-    const statusEl = document.getElementById('status');
-    const setStatus = (msg) => { statusEl.textContent = `[cursor-persist v${VERSION}] ${msg}`; };
 
-    // The docId is set asynchronously in bootstrap via grist.docApi.getDocName(),
-    // which returns a stable per-doc string. We only use it as part of the
-    // storage key, so a fallback is fine.
+    // Role: 'listener' (save-only), 'driver' (restore-only), or 'both' (legacy).
+    const ROLE = (params.get('role') || 'both').toLowerCase();
+    const VALID_ROLES = new Set(['listener', 'driver', 'both']);
+    const role = VALID_ROLES.has(ROLE) ? ROLE : 'both';
+
+    const statusEl = document.getElementById('status');
+    const setStatus = (msg) => {
+      statusEl.textContent = `[cursor-persist v${VERSION} ${role}] ${msg}`;
+    };
+
+    // Discover the docId via grist.docApi.getDocName() (stable per-doc string),
+    // with URL-query and referrer fallbacks for older SDKs.
     async function discoverDocId() {
-      // Preferred: grist.docApi.getDocName() — stable per-doc string.
       try {
         if (grist.docApi && typeof grist.docApi.getDocName === 'function') {
           const name = await grist.docApi.getDocName();
           if (name) return name;
         }
       } catch (_) { /* fall through */ }
-      // Older SDKs / fallback: try the URL query param and the parent URL.
       const p = new URLSearchParams(location.search).get('gristDocId');
       if (p) return p;
       const ref = document.referrer || '';
-      // Grist iframes are typically loaded from `https://<host>/<docId>/<docName>/p/<page>/`.
-      // Take the first path segment of the referrer as a best-effort docId.
       try {
         const u = new URL(ref);
         const seg = u.pathname.split('/').filter(Boolean)[0];
@@ -72,23 +87,21 @@
 
     let docId = 'unknown';
     let tableId = null;
-    let storageKey = null;     // built once tableId is known
-    let restored = false;      // gate: ignore onRecord until restore completes
-    let lastSavedId = null;    // dedupe writes
+    let storageKey = null;
+    let restored = false;
+    let lastSavedId = null;
 
     function buildKey() {
       return `${KEY_PREFIX}::${docId}::${tableId || 'unknown'}`;
     }
 
     async function discoverTableId() {
-      // Try the modern SDK path first.
       try {
         if (grist.selectedTable && typeof grist.selectedTable.getTableId === 'function') {
           const id = await grist.selectedTable.getTableId();
           if (id) return id;
         }
       } catch (_) { /* fall through */ }
-      // Older SDKs: grist.getTable() returns a thenable proxy; some expose .tableId
       try {
         const t = await grist.getTable();
         if (t && t.tableId) return t.tableId;
@@ -99,7 +112,7 @@
     async function restoreSelection() {
       const raw = localStorage.getItem(storageKey);
       if (raw == null) {
-        setStatus(`no stored cursor for ${tableId || 'unbound table'}; idle`);
+        setStatus(`no stored cursor for ${tableId || 'unbound'}; idle`);
         return;
       }
       const rowId = Number(raw);
@@ -107,29 +120,32 @@
         setStatus(`stored value not a row id: ${raw}; idle`);
         return;
       }
-      // Use the explicit-tableId form when we know it — far more reliable
-      // than the bare-array legacy form in current Grist SDK.
       const payload = tableId ? { tableId, rowIds: [rowId] } : [rowId];
-      await grist.setSelectedRows(payload);
-      lastSavedId = rowId;
-      setStatus(`restored ${tableId || 'table'} row ${rowId}`);
-      console.log('[cursor-persist] restored', tableId, rowId);
+      try {
+        await grist.setSelectedRows(payload);
+        lastSavedId = rowId;
+        setStatus(`broadcast ${tableId || 'table'} row ${rowId}`);
+        console.log('[cursor-persist] broadcast', tableId, rowId);
+      } catch (err) {
+        // In `both` mode this is the expected LinkConfig cycle error.
+        setStatus(`broadcast failed: ${err && err.message || err}`);
+        console.warn('[cursor-persist] broadcast failed:', err);
+      }
     }
 
-    // 1) Initialize.
     grist.ready({
       requiredAccess: 'full',
-      // No `columns` here. We only need record.id, which Grist always
-      // provides for the bound row. Declaring a fake column would force
-      // the user through a mapping UI for no benefit.
+      // `driver` role doesn't need to broadcast through allowSelectBy from
+      // Grist's perspective — the master section follows us via its own
+      // Select By config — but declaring allowSelectBy: true here makes the
+      // widget appear in the master's "Select By" dropdown in the Grist UI,
+      // which the user needs to be able to wire the topology.
       allowSelectBy: true
     });
 
-    // 2) Whenever the cursor moves in the bound table, save the id —
-    //    but only AFTER restore has run, so we don't overwrite the stored
-    //    value with Grist's initial cursor.
     grist.onRecord(record => {
       if (!restored) return;
+      if (role === 'driver') return;     // driver never saves
       if (!record || record.id == null) return;
       const id = Number(record.id);
       if (!Number.isFinite(id) || id <= 0) return;
@@ -145,15 +161,15 @@
       }
     });
 
-    // 3) Bootstrap: discover the tableId, build the storage key, attempt
-    //    restore, THEN flip the `restored` flag so subsequent onRecord
-    //    callbacks start saving. This ordering is the heart of the fix.
     (async () => {
       try {
         [docId, tableId] = await Promise.all([discoverDocId(), discoverTableId()]);
         storageKey = buildKey();
-        setStatus(`waiting for grist (doc=${docId}, table=${tableId || 'unbound'})`);
-        await restoreSelection();
+        setStatus(`ready (doc=${docId}, table=${tableId || 'unbound'})`);
+        // Listener role skips restore. Driver and `both` attempt it.
+        if (role !== 'listener') {
+          await restoreSelection();
+        }
       } catch (err) {
         console.warn('[cursor-persist] bootstrap failed:', err);
         setStatus(`bootstrap failed: ${err && err.message || err}`);
