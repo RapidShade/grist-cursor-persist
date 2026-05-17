@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Cursor Persist (v0.4.0)</title>
+  <title>Cursor Persist (v0.4.1)</title>
   <style>
     html, body {
       margin: 0; padding: 0;
@@ -54,7 +54,7 @@
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '0.4.0';
+    const VERSION = '0.4.1';
     const KEY_PREFIX = 'persist_cursor';
     const VALID_ROLES = ['listener', 'driver', 'both'];
     const DEFAULT_ROLE = 'listener';
@@ -171,9 +171,13 @@
         setStatus(`stored value not a row id: ${raw}; idle`);
         return;
       }
-      const payload = tableId ? { tableId, rowIds: [rowId] } : [rowId];
+      // Use the bare-array form. The {tableId, rowIds} object form
+      // is partially implemented in Grist: WidgetFrame stores the object,
+      // but LinkingState._srcCustomFilter does `.map()` on it and crashes
+      // with "o.map is not a function". The bare array form is what the
+      // reactivity layer actually expects.
       try {
-        await grist.setSelectedRows(payload);
+        await grist.setSelectedRows([rowId]);
         lastSavedId = rowId;
         setStatus(`broadcast ${tableId || 'table'} row ${rowId}`);
         console.log('[cursor-persist] broadcast', tableId, rowId);
