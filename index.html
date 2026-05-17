@@ -5,7 +5,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Cursor Persist (v1.5.0)</title>
+  <title>Cursor Persist (v2.0.0)</title>
   <style>
     html, body {
       margin: 0; padding: 0;
@@ -68,7 +68,7 @@
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '1.5.0';
+    const VERSION = '2.0.0';
     const VLOG_PREFIX = `[cursor-persist v${VERSION}]`;
     const KEY_PREFIX = 'persist_cursor';
 
@@ -89,8 +89,8 @@
     const DEFAULT_ROLE = 'listener';
     const ROLE_HELP = {
       listener: 'Wiring: this widget\'s Select By → your master grid.',
-      driver:   'Wiring: master grid\'s Select By → this widget. Filter is sticky — clear Select By to unfilter.',
-      both:     'Combines listener + driver. Set Select By → master on this widget; master grid Select By → this widget.'
+      driver:   'Same-origin: no wiring needed (sets URL anchor). Cross-origin fallback: master Select By → this widget (filter-sticky).',
+      both:     'Combines listener + driver. Listener side: Select By → master on this widget. Driver side: see driver row.'
     };
 
     const params = new URLSearchParams(location.search);
@@ -189,6 +189,62 @@
       return `${KEY_PREFIX}::${docId}::${tableId || 'unknown'}`;
     }
 
+    // Returns the master section id for the current page that views
+    // our bound table, or null if none. "Master" = non-Custom-Widget
+    // section. Uses _grist_Tables + _grist_Views_section (+ _grist_Pages
+    // when the URL id maps via viewRef rather than directly).
+    async function findMasterSectionId(pathname) {
+      if (!tableId) return null;
+      const m = (pathname || '').match(/\/p\/(\d+)/);
+      const urlId = m ? Number(m[1]) : null;
+
+      const tables = await grist.docApi.fetchTable('_grist_Tables');
+      const tableIdxs = (tables.tableId || [])
+        .map((t, i) => t === tableId ? i : -1)
+        .filter(i => i >= 0);
+      if (tableIdxs.length === 0) return null;
+      const tableRefs = new Set(tableIdxs.map(i => tables.id[i]));
+
+      // Resolve the URL id to a view ref. /p/<n> may be a page id
+      // (then page.viewRef → section.parentId) OR a view id directly.
+      // We accept either by adding both candidates to the match set.
+      const viewRefCandidates = new Set();
+      if (urlId !== null) viewRefCandidates.add(urlId);
+      try {
+        const pages = await grist.docApi.fetchTable('_grist_Pages');
+        const ids = pages.id || [];
+        const viewRefs = pages.viewRef || [];
+        for (let i = 0; i < ids.length; i++) {
+          if (ids[i] === urlId && viewRefs[i] != null) {
+            viewRefCandidates.add(viewRefs[i]);
+          }
+        }
+      } catch (_) { /* _grist_Pages may not exist on older versions */ }
+
+      const secs = await grist.docApi.fetchTable('_grist_Views_section');
+      const sIds = secs.id || [];
+      const sTableRef = secs.tableRef || [];
+      const sParentId = secs.parentId || [];
+      const sParentKey = secs.parentKey || [];
+
+      // First pass: section on the current page.
+      for (let i = 0; i < sIds.length; i++) {
+        if (tableRefs.has(sTableRef[i]) &&
+            sParentKey[i] !== 'custom' &&
+            viewRefCandidates.has(sParentId[i])) {
+          return sIds[i];
+        }
+      }
+      // Fallback: any non-Custom section on our table. Grist will
+      // navigate the user to whatever page contains it.
+      for (let i = 0; i < sIds.length; i++) {
+        if (tableRefs.has(sTableRef[i]) && sParentKey[i] !== 'custom') {
+          return sIds[i];
+        }
+      }
+      return null;
+    }
+
     async function restoreSelection() {
       const raw = localStorage.getItem(storageKey);
       if (raw == null) {
@@ -200,19 +256,56 @@
         setStatus(`stored value not a row id: ${raw}; idle`);
         return;
       }
-      // Driver fires one setSelectedRows([rowId]) broadcast. Master
-      // sections with Select By → this driver filter to that single
-      // row — cursor lands on it. Filter is sticky; user clears it
-      // manually via the master's Select By dropdown when they want
-      // to browse other rows.
+
+      // Try same-origin anchor navigation first. If the widget is hosted
+      // same-origin with Grist, parent.location is readable and we can
+      // set the URL hash to a Grist anchor (#a1.s<sectionId>.r<rowId>),
+      // which Grist's URLState handler dispatches as a real cross-section
+      // cursor move — no filter, no SDK calls.
+      let parentLoc = null;
+      let pathname = null;
+      try {
+        parentLoc = window.parent.location;
+        pathname = parentLoc.pathname;  // touch to actually trigger cross-origin check
+      } catch (err) {
+        parentLoc = null;
+        vlog('cross-origin (parent.location blocked):', err && err.message || err);
+      }
+
+      if (parentLoc) {
+        let sectionId = null;
+        try {
+          sectionId = await findMasterSectionId(pathname);
+        } catch (err) {
+          vwarn('section discovery failed:', err);
+        }
+        if (sectionId) {
+          const anchor = `#a1.s${sectionId}.r${rowId}`;
+          try {
+            parentLoc.hash = anchor;
+            lastSavedId = rowId;
+            setStatus(`restored row ${rowId} via anchor (s${sectionId})`);
+            vlog('parent.location.hash =', anchor);
+            return;
+          } catch (err) {
+            vwarn('hash set failed (will fall back):', err);
+          }
+        } else {
+          vwarn('no non-Custom section found for', tableId, '— falling back to setSelectedRows');
+        }
+      }
+
+      // Cross-origin or discovery-failed path: legacy v1.5.0 behavior.
+      // Master sections wired with Select By → this driver will filter
+      // to the single row (cursor lands there, filter is sticky).
       try {
         await grist.setSelectedRows([rowId]);
         lastSavedId = rowId;
-        setStatus(`restored row ${rowId} (filter applied)`);
-        vlog('setSelectedRows([' + rowId + '])');
+        setStatus(`restored row ${rowId} (legacy filter; same-origin path unavailable)`);
+        vlog('fallback: setSelectedRows([' + rowId + '])');
       } catch (err) {
         setStatus(`restore failed: ${err && err.message || err}`);
-        vwarn('setSelectedRows failed:', err);
+        vwarn('setSelectedRows fallback failed:', err);
       }
     }
 
