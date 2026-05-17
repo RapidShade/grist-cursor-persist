@@ -22,35 +22,43 @@
 </head>
 <body class="silent">
   <!--
-    Cursor Persist v1.5.0 — filter-on-restore, by design.
+    Cursor Persist v2.0.0 — same-origin anchor navigation (with
+    cross-origin fallback to setSelectedRows).
 
-    All "navigate without filtering" SDK paths have been verified
-    closed (setCursorPos delegates to own _baseView only, commandApi
-    whitelists only undo/redo/viewAsCard). The remaining working
-    behavior is filter-linking: setSelectedRows([rowId]) on the
-    driver narrows the master to a single row, positioning its
-    cursor. The filter stays — by design — until the user clears
-    it manually (clear Select By, or pick a new row in the master).
+    DRIVER, same-origin host (recommended):
+      Sets window.parent.location.hash = "#a1.s<sectionId>.r<rowId>".
+      Grist's URLState handler picks up the hashchange and positions
+      the cursor on that section/row — no filter, no doc edit, no
+      SDK whitelist gymnastics. Verified via origin-probe widget.
 
-    Wiring: master sections that should follow the driver need
-    `Select By → driver`. Listener side is unchanged.
+    DRIVER, cross-origin host (fallback):
+      parent.location is unreadable from a cross-origin iframe.
+      Driver falls back to v1.5.0 setSelectedRows([rowId]) behavior:
+      master filters to one row, cursor lands, filter is sticky.
 
-    Role is selectable from the dropdown below; the choice is persisted
-    per-section via Grist's widget options API. URL `?role=` overrides
-    (and disables) the dropdown for the duration of that section's life.
+    Same-origin is detected at runtime, not config. The same widget
+    binary works on both hosts.
+
+    LISTENER (both hosts): unchanged from v1.x — saves cursor via
+    grist.onRecord to localStorage per (doc, table).
+
+    Role is selectable from the dropdown below; the choice is
+    persisted per-section via Grist's widget options API. URL
+    `?role=` overrides (and disables) the dropdown.
 
     Roles:
       listener (default): Select By → your master. Saves cursor changes.
-      driver:             No Select By. Master Select By → this widget.
-                          Broadcasts the stored row id on mount.
-      both:               Legacy combined mode. May trigger a LinkConfig
-                          cycle error if this widget has Select By → master.
+      driver:             Same-origin: NO Select By needed.
+                          Cross-origin fallback: master Select By → this.
+      both:               Listener + driver in one widget. Listener side
+                          needs Select By → master; driver side as above.
 
-    Setup, per page:
-      1. Add Custom Widget #1 — bind to Events, role=listener, Select By → master.
-      2. Add Custom Widget #2 — bind to Events, role=driver, no Select By.
-      3. On the master grid: set Select By → widget #2.
-      4. Add `?debug=1` to either URL while verifying.
+    Setup, per page (same-origin host):
+      1. Add Custom Widget #1 — bind to Events, role=listener,
+         Select By → master.
+      2. Add Custom Widget #2 — bind to Events, role=driver. No
+         Select By needed on either side.
+      3. Add `?debug=1` to either URL while verifying.
   -->
 
   <div id="panel">
