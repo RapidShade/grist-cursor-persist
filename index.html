@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Cursor Persist (v1.0.0)</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Cursor Persist (v1.0.1)</title>
   <style>
     html, body {
       margin: 0; padding: 0;
@@ -19,7 +22,13 @@
 </head>
 <body class="silent">
   <!--
-    Cursor Persist v1.0.0 — two-widget topology with in-widget role picker.
+    Cursor Persist v1.0.1 — two-widget topology with in-widget role picker.
+
+    Driver-mode restore now uses the "broadcast then widen" trick: it
+    first broadcasts just the saved row id (filters master to that row,
+    cursor lands there), then broadcasts every row id in the bound table
+    (filter set = all rows = effectively unfiltered) so the master stays
+    on the cursor row but is free to navigate.
 
     Role is selectable from the dropdown below; the choice is persisted
     per-section via Grist's widget options API. URL `?role=` overrides
@@ -54,8 +63,23 @@
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
   <script>
-    const VERSION = '1.0.0';
+    const VERSION = '1.0.1';
+    const VLOG_PREFIX = `[cursor-persist v${VERSION}]`;
     const KEY_PREFIX = 'persist_cursor';
+
+    // Versioned console wrappers so every log line carries the build version.
+    const vlog  = (...a) => console.log(VLOG_PREFIX, ...a);
+    const vwarn = (...a) => console.warn(VLOG_PREFIX, ...a);
+    const verr  = (...a) => console.error(VLOG_PREFIX, ...a);
+
+    // Loud, hard-to-miss load banner. Uses raw console.log so the %c
+    // styling renders without an extra prefix shifted in front of it.
+    console.log(
+      `%c${VLOG_PREFIX}%c loaded — ${new Date().toLocaleTimeString()}`,
+      'background:#0066cc;color:#fff;font-weight:bold;padding:2px 6px;border-radius:3px;',
+      'color:#0066cc;font-weight:bold;'
+    );
+
     const VALID_ROLES = ['listener', 'driver', 'both'];
     const DEFAULT_ROLE = 'listener';
     const ROLE_HELP = {
@@ -99,7 +123,7 @@
           }
         }
       } catch (err) {
-        console.warn('[cursor-persist] getOptions failed:', err);
+        vwarn('[cursor-persist] getOptions failed:', err);
       }
       roleSelectEl.value = DEFAULT_ROLE;
       updateHelp(DEFAULT_ROLE);
@@ -171,19 +195,48 @@
         setStatus(`stored value not a row id: ${raw}; idle`);
         return;
       }
-      // Use the bare-array form. The {tableId, rowIds} object form
-      // is partially implemented in Grist: WidgetFrame stores the object,
-      // but LinkingState._srcCustomFilter does `.map()` on it and crashes
-      // with "o.map is not a function". The bare array form is what the
-      // reactivity layer actually expects.
+      // Phase 1 — broadcast just the saved id. The master section
+      // (with Select By → this driver) filters down to that single row,
+      // which positions its cursor on row `rowId`.
+      // Bare-array form (not {tableId, rowIds}) — the object form trips
+      // LinkingState._srcCustomFilter which does `.map()` on the value.
       try {
         await grist.setSelectedRows([rowId]);
         lastSavedId = rowId;
-        setStatus(`broadcast ${tableId || 'table'} row ${rowId}`);
-        console.log('[cursor-persist] broadcast', tableId, rowId);
+        setStatus(`phase 1: filter to row ${rowId}`);
+        vlog('phase 1: broadcast', tableId, rowId);
       } catch (err) {
-        setStatus(`broadcast failed: ${err && err.message || err}`);
-        console.warn('[cursor-persist] broadcast failed:', err);
+        setStatus(`phase 1 failed: ${err && err.message || err}`);
+        vwarn('phase 1 failed:', err);
+        return;
+      }
+
+      // Give Grist a tick to apply the filter + cursor change.
+      await new Promise(r => setTimeout(r, 250));
+
+      // Phase 2 — broadcast every row id in the bound table. The filter
+      // set becomes "all rows", which is effectively no filter, but the
+      // master's cursor stays on `rowId` (it wasn't moved, just unfiltered).
+      // The user can navigate freely from there.
+      if (!tableId) {
+        setStatus(`broadcast ${rowId} (no tableId — can't widen filter)`);
+        return;
+      }
+      try {
+        const table = await grist.docApi.fetchTable(tableId);
+        const allIds = Array.isArray(table && table.id) ? table.id : [];
+        if (allIds.length === 0) {
+          setStatus(`broadcast ${rowId} (fetchTable returned no ids; filter stays narrow)`);
+          vwarn('phase 2: fetchTable returned no ids for', tableId);
+          return;
+        }
+        const broadcast = [rowId, ...allIds.filter(i => i !== rowId)];
+        await grist.setSelectedRows(broadcast);
+        setStatus(`restored row ${rowId} (filter widened to ${broadcast.length} rows)`);
+        vlog('phase 2: widened filter to', broadcast.length, 'rows');
+      } catch (err) {
+        setStatus(`phase 2 failed: ${err && err.message || err}`);
+        vwarn('phase 2 failed:', err);
       }
     }
 
@@ -202,10 +255,10 @@
       try {
         localStorage.setItem(storageKey, String(id));
         lastSavedId = id;
-        console.log('[cursor-persist] saved', tableId, id);
+        vlog('[cursor-persist] saved', tableId, id);
         setStatus(`saved ${tableId || 'table'} row ${id}`);
       } catch (err) {
-        console.warn('[cursor-persist] save failed:', err);
+        vwarn('[cursor-persist] save failed:', err);
         setStatus(`save failed: ${err && err.message || err}`);
       }
     });
@@ -220,7 +273,7 @@
           await restoreSelection();
         }
       } catch (err) {
-        console.warn('[cursor-persist] bootstrap failed:', err);
+        vwarn('[cursor-persist] bootstrap failed:', err);
         setStatus(`bootstrap failed: ${err && err.message || err}`);
       } finally {
         restored = true;
